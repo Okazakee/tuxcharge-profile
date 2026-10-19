@@ -51,11 +51,20 @@ jobs:
           printf '%s\n' "${{ secrets.AUR_SSH_KEY }}" > ~/.ssh/aur
           chmod 600 ~/.ssh/aur
           ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
-      - name: Clone AUR package
+      - name: Prepare AUR repository
         shell: bash
         env:
           GIT_SSH_COMMAND: ssh -i ~/.ssh/aur -o StrictHostKeyChecking=accept-new
-        run: git clone ssh://aur@aur.archlinux.org/tuxcharge-profile.git aur-pkg
+        run: |
+          if git clone ssh://aur@aur.archlinux.org/tuxcharge-profile.git aur-pkg 2>/dev/null; then
+            echo "cloned existing AUR package"
+          else
+            echo "no AUR package yet — creating it with the first push"
+            rm -rf aur-pkg
+            mkdir -p aur-pkg && cd aur-pkg
+            git init -q -b master
+            git remote add origin ssh://aur@aur.archlinux.org/tuxcharge-profile.git
+          fi
       - name: Update PKGBUILD and .SRCINFO
         shell: bash
         run: |
