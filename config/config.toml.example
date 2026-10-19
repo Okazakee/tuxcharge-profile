@@ -1,0 +1,14 @@
+# tuxcharge-profile — charging profile per Wi-Fi network
+#
+# Profiles written by the TUXEDO driver (Uniwill EC):
+#   high_capacity  full charge, full charging speed  (100%)
+#   balanced       reduced capacity                  (~90%)
+#   stationary     stationary use, slowest charging   (~80%)
+#
+# Any network without a rule below gets `default`.
+
+default = "high_capacity"
+
+[networks]
+# Quotes are required for SSIDs containing spaces or special characters.
+"Calypso-TIM" = "stationary"

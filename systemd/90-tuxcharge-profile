@@ -1,0 +1,5 @@
+#!/bin/sh
+# Installed by tuxcharge-profile — apply the charging profile for the new network.
+# NetworkManager runs this as root on every network change.
+[ -x /usr/local/bin/tuxcharge-profile ] || exit 0
+exec /usr/local/bin/tuxcharge-profile apply --quiet

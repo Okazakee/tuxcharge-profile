@@ -1,0 +1,13 @@
+[Unit]
+Description=Apply TUXEDO charging profile for the current network (tuxcharge-profile)
+Documentation=https://github.com/Okazakee/tuxcharge-profile
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/tuxcharge-profile apply
+
+[Install]
+WantedBy=multi-user.target

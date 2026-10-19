@@ -1,0 +1,27 @@
+[package]
+name = "tuxcharge-profile"
+version = "0.1.0"
+edition = "2021"
+description = "Set a TUXEDO laptop charging profile based on the connected Wi-Fi network"
+license = "MIT"
+repository = "https://github.com/Okazakee/tuxcharge-profile"
+homepage = "https://github.com/Okazakee/tuxcharge-profile"
+authors = ["Okazakee <okazakee@proton.me>"]
+keywords = ["tuxedo", "battery", "charging", "networkmanager", "embedded-controller"]
+categories = ["hardware-support", "command-line-utilities"]
+
+[profile.release]
+lto = true
+strip = true
+
+[lib]
+name = "tuxcharge_profile_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tuxcharge-profile"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
