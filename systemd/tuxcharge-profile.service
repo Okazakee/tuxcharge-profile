@@ -7,7 +7,7 @@ Wants=NetworkManager.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/local/bin/tuxcharge-profile apply
+ExecStart=/usr/bin/tuxcharge-profile apply
 
 [Install]
 WantedBy=multi-user.target

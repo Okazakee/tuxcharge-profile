@@ -22,7 +22,7 @@ pub const KNOWN_PROFILES: [&str; 3] = ["high_capacity", "balanced", "stationary"
 /// Profile applied when no rule matches (full charge, no limit).
 pub const DEFAULT_PROFILE: &str = "high_capacity";
 
-/// Template written by `tuxcharge-profile install`.
+/// Template written by `tuxcharge-profile install` and shipped as an example.
 pub const EXAMPLE_CONFIG: &str = r#"# tuxcharge-profile — charging profile per Wi-Fi network
 #
 # Profiles written by the TUXEDO driver (Uniwill EC):
@@ -36,8 +36,11 @@ default = "high_capacity"
 
 [networks]
 # Quotes are required for SSIDs containing spaces or special characters.
-"Calypso-TIM" = "stationary"
+"HomeWiFi" = "stationary"
 "#;
+
+/// Where the example config lives when installed from a package.
+pub const EXAMPLE_CONFIG_PATH: &str = "/usr/share/tuxcharge-profile/config.toml.example";
 
 // =====================================================================
 // config
@@ -105,6 +108,50 @@ impl Config {
             },
         }
     }
+}
+
+/// Load the config; a missing file is not an error.
+///
+/// Returns the config and whether the built-in defaults were used, so callers
+/// can warn about it. A present-but-invalid config is still an error.
+pub fn load_config(path: &Path) -> Result<(Config, bool), String> {
+    if !path.exists() {
+        return Ok((Config::default(), true));
+    }
+
+    Ok((Config::load(path)?, false))
+}
+
+/// NetworkManager dispatcher script, run as root on network changes.
+pub fn dispatcher_script(bin: &str) -> String {
+    format!(
+        r#"#!/bin/sh
+# Installed by tuxcharge-profile — apply the charging profile for the new network.
+# NetworkManager runs this as root on every network change.
+[ -x {bin} ] || exit 0
+exec {bin} apply --quiet
+"#
+    )
+}
+
+/// systemd unit re-asserting the profile at boot.
+pub fn service_unit(bin: &str) -> String {
+    format!(
+        r#"[Unit]
+Description=Apply TUXEDO charging profile for the current network (tuxcharge-profile)
+Documentation=https://github.com/Okazakee/tuxcharge-profile
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart={bin} apply
+
+[Install]
+WantedBy=multi-user.target
+"#
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -423,6 +470,42 @@ mod tests {
         assert_eq!(ec.current().unwrap(), "high_capacity");
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn missing_config_falls_back_to_defaults() {
+        let path = std::env::temp_dir().join(format!(
+            "tuxcharge-profile-test-missing-{}/config.toml",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+
+        let (config, fallback) = load_config(&path).unwrap();
+        assert!(fallback);
+        assert_eq!(config.default_profile, DEFAULT_PROFILE);
+        assert!(config.networks.is_empty());
+    }
+
+    #[test]
+    fn invalid_config_is_still_an_error() {
+        let dir = std::env::temp_dir().join(format!(
+            "tuxcharge-profile-test-invalid-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        fs::write(&path, "default = \n").unwrap();
+
+        assert!(load_config(&path).is_err());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn templates_embed_the_binary_path() {
+        let bin = "/usr/bin/tuxcharge-profile";
+        assert!(dispatcher_script(bin).contains("/usr/bin/tuxcharge-profile apply --quiet"));
+        assert!(service_unit(bin).contains("ExecStart=/usr/bin/tuxcharge-profile apply"));
     }
 
     #[test]

@@ -17,28 +17,6 @@ const CONFIG_PATH: &str = "/etc/tuxcharge-profile/config.toml";
 const SERVICE_PATH: &str = "/etc/systemd/system/tuxcharge-profile.service";
 const DISPATCHER_PATH: &str = "/etc/NetworkManager/dispatcher.d/90-tuxcharge-profile";
 
-const DISPATCHER_CONTENT: &str = r#"#!/bin/sh
-# Installed by tuxcharge-profile — apply the charging profile for the new network.
-# NetworkManager runs this as root on every network change.
-[ -x /usr/local/bin/tuxcharge-profile ] || exit 0
-exec /usr/local/bin/tuxcharge-profile apply --quiet
-"#;
-
-const SERVICE_CONTENT: &str = r#"[Unit]
-Description=Apply TUXEDO charging profile for the current network (tuxcharge-profile)
-Documentation=https://github.com/Okazakee/tuxcharge-profile
-After=NetworkManager.service
-Wants=NetworkManager.service
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/usr/local/bin/tuxcharge-profile apply
-
-[Install]
-WantedBy=multi-user.target
-"#;
-
 struct Options {
     config: PathBuf,
     ec: PathBuf,
@@ -155,7 +133,12 @@ PROFILES:
     high_capacity   full charge (100%)
     balanced        reduced capacity (~90%)
     stationary      stationary use (~80%, slowest charging)
-"
+
+Config, when no file is present, defaults to full capacity:
+    {EXAMPLE}
+
+",
+        EXAMPLE = lib::EXAMPLE_CONFIG_PATH
     );
 }
 
@@ -163,13 +146,27 @@ PROFILES:
 // apply
 // =====================================================================
 
+/// Load the config, warning when the built-in defaults are in use.
+fn configured(path: &Path) -> Result<lib::Config, String> {
+    let (config, fallback) = lib::load_config(path)?;
+    if fallback {
+        eprintln!(
+            "{BIN}: no config at {} — using defaults ({}); example: {}",
+            path.display(),
+            config.default_profile,
+            lib::EXAMPLE_CONFIG_PATH
+        );
+    }
+    Ok(config)
+}
+
 fn cmd_apply(opts: &Options) -> i32 {
     if lib::tccd_running() {
         eprintln!("{BIN}: tccd is running and owns the charging profile — leaving it alone");
         return 0;
     }
 
-    let config = match lib::Config::load(&opts.config) {
+    let config = match configured(&opts.config) {
         Ok(config) => config,
         Err(err) => {
             eprintln!("{BIN}: {err}");
@@ -232,10 +229,12 @@ fn print_report(report: &lib::Report, quiet: bool) {
 
 fn cmd_status(opts: &Options) -> i32 {
     let ec = lib::Ec::new(opts.ec.clone());
+    let loaded = lib::load_config(&opts.config);
 
     println!("config       {}", opts.config.display());
-    match lib::Config::load(&opts.config) {
-        Ok(config) => println!(
+    match &loaded {
+        Ok((_, true)) => println!("             missing — using defaults"),
+        Ok((config, false)) => println!(
             "             default \"{}\", {} rule(s)",
             config.default_profile,
             config.networks.len()
@@ -252,7 +251,7 @@ fn cmd_status(opts: &Options) -> i32 {
     };
     println!("network      {}", ssid.as_deref().unwrap_or("(none)"));
 
-    if let Ok(config) = lib::Config::load(&opts.config) {
+    if let Ok((config, _)) = &loaded {
         let resolution = config.resolve(ssid.as_deref());
         println!(
             "wanted       {} ({})",
@@ -337,7 +336,7 @@ fn cmd_set(opts: &Options, rest: &[String]) -> i32 {
 fn cmd_install(opts: &Options) -> i32 {
     if opts.dry_run {
         println!("[dry-run] would install:");
-        println!("  binary      {INSTALL_BIN}");
+        println!("  binary      {INSTALL_BIN} (unless already in /usr)");
         println!("  config      {CONFIG_PATH} (only if absent)");
         println!("  NM hook     {DISPATCHER_PATH}");
         println!("  unit        {SERVICE_PATH}");
@@ -360,27 +359,21 @@ fn cmd_install(opts: &Options) -> i32 {
         println!("kept existing {CONFIG_PATH}");
     }
 
-    let exe = match std::env::current_exe() {
-        Ok(exe) => exe,
+    let bin = match install_binary() {
+        Ok(bin) => bin,
         Err(err) => {
-            eprintln!("{BIN}: cannot locate own binary: {err}");
+            eprintln!("{BIN}: {err}");
             return 1;
         }
     };
-    if exe != Path::new(INSTALL_BIN) {
-        if let Err(err) = fs::copy(&exe, INSTALL_BIN) {
-            eprintln!("{BIN}: cannot install binary to {INSTALL_BIN}: {err}");
-            return 1;
-        }
-        let _ = fs::set_permissions(INSTALL_BIN, fs::Permissions::from_mode(0o755));
-        println!("installed {INSTALL_BIN}");
-    }
 
-    let scripts: [(&str, &str, u32); 2] = [
-        (DISPATCHER_PATH, DISPATCHER_CONTENT, 0o755),
-        (SERVICE_PATH, SERVICE_CONTENT, 0o644),
+    // Both templates point at the binary that will actually run.
+    let bin_path = format!("{}", bin.display());
+    let files: [(&str, String, u32); 2] = [
+        (DISPATCHER_PATH, lib::dispatcher_script(&bin_path), 0o755),
+        (SERVICE_PATH, lib::service_unit(&bin_path), 0o644),
     ];
-    for (path, content, mode) in scripts {
+    for (path, content, mode) in files {
         if let Err(err) = fs::write(path, content) {
             eprintln!("{BIN}: cannot write {path}: {err}");
             return 1;
@@ -402,4 +395,24 @@ fn cmd_install(opts: &Options) -> i32 {
 
     println!("\ndone — edit {CONFIG_PATH} to map your networks, then: {BIN} apply");
     0
+}
+
+/// Path the installed service should invoke.
+///
+/// A binary already living in `/usr` (package install) is used as-is; anything
+/// else is copied to `/usr/local/bin` first.
+fn install_binary() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("cannot locate own binary: {e}"))?;
+
+    if exe.starts_with("/usr/bin") || exe.starts_with("/usr/local/bin") {
+        println!("using existing {}", exe.display());
+        return Ok(exe);
+    }
+
+    fs::copy(&exe, INSTALL_BIN)
+        .map_err(|e| format!("cannot install binary to {INSTALL_BIN}: {e}"))?;
+    let _ = fs::set_permissions(INSTALL_BIN, fs::Permissions::from_mode(0o755));
+    println!("installed {INSTALL_BIN}");
+
+    Ok(PathBuf::from(INSTALL_BIN))
 }

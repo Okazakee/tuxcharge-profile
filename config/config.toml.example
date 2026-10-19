@@ -11,4 +11,5 @@ default = "high_capacity"
 
 [networks]
 # Quotes are required for SSIDs containing spaces or special characters.
-"Calypso-TIM" = "stationary"
+"HomeWiFi" = "stationary"
+"Office WiFi" = "balanced"

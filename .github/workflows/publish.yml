@@ -1,0 +1,82 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked
+
+  aur:
+    needs: test
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Install deps
+        run: pacman -Syu --noconfirm git base-devel openssh
+      - uses: actions/checkout@v4
+      - name: Check version matches tag
+        shell: bash
+        run: |
+          CARGO_VER=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml)
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          if [ "$CARGO_VER" != "$TAG_VER" ]; then
+            echo "Cargo.toml version ($CARGO_VER) doesn't match tag ($TAG_VER)"
+            exit 1
+          fi
+      - name: Compute tarball hash
+        id: hash
+        shell: bash
+        run: |
+          sha=$(curl -sL "https://github.com/${{ github.repository }}/archive/refs/tags/${{ github.ref_name }}.tar.gz" | sha256sum | cut -d' ' -f1)
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+      - name: Setup SSH key
+        shell: bash
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.AUR_SSH_KEY }}" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+      - name: Clone AUR package
+        shell: bash
+        env:
+          GIT_SSH_COMMAND: ssh -i ~/.ssh/aur -o StrictHostKeyChecking=accept-new
+        run: git clone ssh://aur@aur.archlinux.org/tuxcharge-profile.git aur-pkg
+      - name: Update PKGBUILD and .SRCINFO
+        shell: bash
+        run: |
+          cp packaging/aur/PKGBUILD aur-pkg/PKGBUILD
+          cd aur-pkg
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -i "s/^pkgver=.*/pkgver=$VERSION/" PKGBUILD
+          sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+          sed -i "s/^sha256sums=.*/sha256sums=('${{ steps.hash.outputs.sha256 }}')/" PKGBUILD
+          # makepkg refuses to run as root, so generate .SRCINFO as a normal user
+          useradd -m builder
+          chown -R builder .
+          su builder -c 'makepkg --printsrcinfo' > .SRCINFO
+      - name: Commit and push
+        shell: bash
+        env:
+          GIT_SSH_COMMAND: ssh -i ~/.ssh/aur -o StrictHostKeyChecking=accept-new
+        run: |
+          cd aur-pkg
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add .
+          git commit -m "tuxcharge-profile ${{ github.ref_name }}"
+          git push
