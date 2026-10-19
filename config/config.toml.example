@@ -1,9 +1,13 @@
-# tuxcharge-profile — charging profile per Wi-Fi network
+# tuxcharge-profile — charging profile per network
 #
 # Profiles written by the TUXEDO driver (Uniwill EC):
 #   high_capacity  full charge, full charging speed  (100%)
 #   balanced       reduced capacity                  (~90%)
 #   stationary     stationary use, slowest charging   (~80%)
+#
+# [networks] matches the connected Wi-Fi SSID.
+# [connections] matches the NetworkManager connection name or UUID, which also
+# covers Ethernet. An SSID rule wins when both would apply.
 #
 # Any network without a rule below gets `default`.
 
@@ -13,3 +17,7 @@ default = "high_capacity"
 # Quotes are required for SSIDs containing spaces or special characters.
 "HomeWiFi" = "stationary"
 "Office WiFi" = "balanced"
+
+[connections]
+# Names and UUIDs come from `nmcli -t -f NAME,UUID connection show`.
+"Office dock" = "balanced"

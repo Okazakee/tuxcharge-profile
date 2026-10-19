@@ -1,8 +1,9 @@
 //! Core logic for `tuxcharge-profile`.
 //!
-//! Maps the currently connected Wi-Fi network (SSID) to a TUXEDO embedded
-//! controller charging profile, so the battery charge limit follows you
-//! between networks even without TUXEDO Control Center installed.
+//! Maps the currently connected network (Wi-Fi SSID, or a NetworkManager
+//! connection name/UUID for wired links) to a TUXEDO embedded controller
+//! charging profile, so the battery charge limit follows you between networks
+//! even without TUXEDO Control Center installed.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -23,12 +24,16 @@ pub const KNOWN_PROFILES: [&str; 3] = ["high_capacity", "balanced", "stationary"
 pub const DEFAULT_PROFILE: &str = "high_capacity";
 
 /// Template written by `tuxcharge-profile install` and shipped as an example.
-pub const EXAMPLE_CONFIG: &str = r#"# tuxcharge-profile — charging profile per Wi-Fi network
+pub const EXAMPLE_CONFIG: &str = r#"# tuxcharge-profile — charging profile per network
 #
 # Profiles written by the TUXEDO driver (Uniwill EC):
 #   high_capacity  full charge, full charging speed  (100%)
 #   balanced       reduced capacity                  (~90%)
 #   stationary     stationary use, slowest charging   (~80%)
+#
+# [networks] matches the connected Wi-Fi SSID.
+# [connections] matches the NetworkManager connection name or UUID, which also
+# covers Ethernet. An SSID rule wins when both would apply.
 #
 # Any network without a rule below gets `default`.
 
@@ -37,6 +42,10 @@ default = "high_capacity"
 [networks]
 # Quotes are required for SSIDs containing spaces or special characters.
 "HomeWiFi" = "stationary"
+
+[connections]
+# Names and UUIDs come from `nmcli -t -f NAME,UUID connection show`.
+"Office dock" = "balanced"
 "#;
 
 /// Where the example config lives when installed from a package.
@@ -46,11 +55,15 @@ pub const EXAMPLE_CONFIG_PATH: &str = "/usr/share/tuxcharge-profile/config.toml.
 // config
 // =====================================================================
 
-/// Mapping of Wi-Fi networks to charging profiles.
+/// Mapping of networks to charging profiles.
+///
+/// `[networks]` matches the connected Wi-Fi SSID. `[connections]` matches the
+/// NetworkManager connection name or UUID, which is what Ethernet has.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub default_profile: String,
     pub networks: BTreeMap<String, String>,
+    pub connections: BTreeMap<String, String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -59,6 +72,8 @@ struct RawConfig {
     default: Option<String>,
     #[serde(default)]
     networks: BTreeMap<String, String>,
+    #[serde(default)]
+    connections: BTreeMap<String, String>,
 }
 
 impl Default for Config {
@@ -66,6 +81,7 @@ impl Default for Config {
         Config {
             default_profile: DEFAULT_PROFILE.to_string(),
             networks: BTreeMap::new(),
+            connections: BTreeMap::new(),
         }
     }
 }
@@ -79,6 +95,7 @@ impl Config {
             config.default_profile = default;
         }
         config.networks = raw.networks;
+        config.connections = raw.connections;
 
         Ok(config)
     }
@@ -90,22 +107,37 @@ impl Config {
     }
 
     /// Which profile the given network should use, and why.
-    pub fn resolve(&self, ssid: Option<&str>) -> Resolution {
-        match ssid {
-            Some(ssid) => match self.networks.get(ssid) {
-                Some(profile) => Resolution {
+    ///
+    /// An SSID rule wins over a connection rule, so existing `[networks]`
+    /// configs keep behaving exactly as before.
+    pub fn resolve(&self, active: &ActiveNetwork) -> Resolution {
+        if let Some(ssid) = active.ssid.as_deref() {
+            if let Some(profile) = self.networks.get(ssid) {
+                return Resolution {
                     profile: profile.clone(),
-                    reason: format!("rule for \"{ssid}\""),
-                },
-                None => Resolution {
-                    profile: self.default_profile.clone(),
-                    reason: format!("default (no rule for \"{ssid}\")"),
-                },
-            },
-            None => Resolution {
-                profile: self.default_profile.clone(),
-                reason: "default (no Wi-Fi connected)".to_string(),
-            },
+                    reason: format!("rule for Wi-Fi \"{ssid}\""),
+                };
+            }
+        }
+
+        if let Some(connection) = active.connection.as_ref() {
+            if let Some(profile) = self.connections.get(&connection.name) {
+                return Resolution {
+                    profile: profile.clone(),
+                    reason: format!("rule for connection \"{}\"", connection.name),
+                };
+            }
+            if let Some(profile) = self.connections.get(&connection.uuid) {
+                return Resolution {
+                    profile: profile.clone(),
+                    reason: format!("rule for connection UUID {}", connection.uuid),
+                };
+            }
+        }
+
+        Resolution {
+            profile: self.default_profile.clone(),
+            reason: format!("default (no rule for {})", active.label()),
         }
     }
 }
@@ -267,6 +299,122 @@ pub fn parse_active_ssid(output: &str) -> Option<String> {
         .filter(|ssid| !ssid.is_empty())
 }
 
+/// NetworkManager connection behind the active link.
+///
+/// The name and UUID both address the same profile, and this is the only
+/// identifier Ethernet has: it has no SSID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveConnection {
+    pub name: String,
+    pub uuid: String,
+}
+
+/// Everything matching needs to know about the current network.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ActiveNetwork {
+    pub ssid: Option<String>,
+    pub connection: Option<ActiveConnection>,
+}
+
+impl ActiveNetwork {
+    /// Human-readable description for status output and rule reasons.
+    pub fn label(&self) -> String {
+        match (&self.ssid, &self.connection) {
+            (Some(ssid), _) => format!("Wi-Fi \"{ssid}\""),
+            (None, Some(connection)) => format!("connection \"{}\"", connection.name),
+            (None, None) => "no active network".to_string(),
+        }
+    }
+}
+
+/// Read both identifiers. Wi-Fi is optional; a wired link has only a connection.
+pub fn active_network() -> Result<ActiveNetwork, String> {
+    Ok(ActiveNetwork {
+        ssid: active_ssid()?,
+        connection: active_connection()?,
+    })
+}
+
+/// Name and UUID of the active NetworkManager connection, if any.
+pub fn active_connection() -> Result<Option<ActiveConnection>, String> {
+    let output = Command::new("nmcli")
+        .args([
+            "-t",
+            "-f",
+            "NAME,UUID,TYPE",
+            "connection",
+            "show",
+            "--active",
+        ])
+        .output()
+        .map_err(|e| format!("cannot run nmcli: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("nmcli failed: {}", stderr.trim()));
+    }
+
+    Ok(parse_active_connection(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
+/// Extract the active connection from `nmcli -t connection show --active`.
+///
+/// Prefers a wired or wireless link over a VPN or bridge layered on top of it,
+/// so a VPN does not hide the physical connection a rule was written for.
+pub fn parse_active_connection(output: &str) -> Option<ActiveConnection> {
+    let mut fallback = None;
+
+    for line in output.lines() {
+        let fields = split_nmcli_fields(line);
+        if fields.len() < 3 {
+            continue;
+        }
+
+        let (name, uuid, kind) = (&fields[0], &fields[1], &fields[2]);
+        if name.is_empty() || uuid.is_empty() || kind == "loopback" {
+            continue;
+        }
+
+        let connection = ActiveConnection {
+            name: name.clone(),
+            uuid: uuid.clone(),
+        };
+
+        if kind == "802-11-wireless" || kind == "802-3-ethernet" {
+            return Some(connection);
+        }
+        fallback.get_or_insert(connection);
+    }
+
+    fallback
+}
+
+/// Split one line of `nmcli --terse` output into its fields.
+///
+/// `nmcli` escapes ':' and '\\' inside values with a backslash.
+fn split_nmcli_fields(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut field = String::new();
+    let mut chars = line.chars();
+
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                if let Some(escaped) = chars.next() {
+                    field.push(escaped);
+                }
+            }
+            ':' => fields.push(std::mem::take(&mut field)),
+            _ => field.push(c),
+        }
+    }
+    fields.push(field);
+
+    fields
+}
+
 /// `nmcli --terse` escapes ':' inside values as '\:'.
 fn unescape_nmcli(value: &str) -> String {
     value.replace("\\:", ":")
@@ -298,7 +446,7 @@ pub fn tccd_running() -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
-    pub ssid: Option<String>,
+    pub network: String,
     pub reason: String,
     pub desired: String,
     pub current: String,
@@ -306,11 +454,11 @@ pub struct Report {
     pub dry_run: bool,
 }
 
-/// Decide which profile belongs on `ssid` and apply it unless `dry_run`.
+/// Decide which profile belongs on `active` and apply it unless `dry_run`.
 pub fn apply(
     config: &Config,
     ec: &Ec,
-    ssid: Option<String>,
+    active: &ActiveNetwork,
     dry_run: bool,
 ) -> Result<Report, String> {
     if !ec.present() {
@@ -320,7 +468,7 @@ pub fn apply(
         ));
     }
 
-    let resolution = config.resolve(ssid.as_deref());
+    let resolution = config.resolve(active);
     // Validate even on a dry run: a typo in the config should fail loudly.
     ec.validate(&resolution.profile)?;
 
@@ -332,7 +480,7 @@ pub fn apply(
     }
 
     Ok(Report {
-        ssid,
+        network: active.label(),
         reason: resolution.reason,
         desired: resolution.profile,
         current,
@@ -368,6 +516,23 @@ mod tests {
         (dir, Ec::new(profile_path))
     }
 
+    fn wifi(ssid: &str) -> ActiveNetwork {
+        ActiveNetwork {
+            ssid: Some(ssid.to_string()),
+            connection: None,
+        }
+    }
+
+    fn wired(name: &str, uuid: &str) -> ActiveNetwork {
+        ActiveNetwork {
+            ssid: None,
+            connection: Some(ActiveConnection {
+                name: name.to_string(),
+                uuid: uuid.to_string(),
+            }),
+        }
+    }
+
     #[test]
     fn parses_connected_ssid() {
         let out = "no:Neighbour\nyes:Calypso-TIM\nno:Other\n";
@@ -389,6 +554,42 @@ mod tests {
     }
 
     #[test]
+    fn parses_active_connection_and_skips_non_physical_links() {
+        let out = "\
+lo:11111111-1111-1111-1111-111111111111:loopback\n\
+work vpn:22222222-2222-2222-2222-222222222222:vpn\n\
+HomeWiFi:33333333-3333-3333-3333-333333333333:802-11-wireless\n";
+        assert_eq!(
+            parse_active_connection(out),
+            Some(ActiveConnection {
+                name: "HomeWiFi".to_string(),
+                uuid: "33333333-3333-3333-3333-333333333333".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_wired_connection_with_escaped_colon() {
+        let out = "Office\\: dock:44444444-4444-4444-4444-444444444444:802-3-ethernet\n";
+        assert_eq!(
+            parse_active_connection(out),
+            Some(ActiveConnection {
+                name: "Office: dock".to_string(),
+                uuid: "44444444-4444-4444-4444-444444444444".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn no_active_connection_is_none() {
+        assert_eq!(parse_active_connection(""), None);
+        assert_eq!(
+            parse_active_connection("lo:11111111-1111-1111-1111-111111111111:loopback\n"),
+            None
+        );
+    }
+
+    #[test]
     fn parses_config_with_default_and_rules() {
         let config = Config::parse(
             r#"
@@ -397,13 +598,18 @@ mod tests {
             [networks]
             "Calypso-TIM" = "stationary"
             "Office WiFi" = "balanced"
+
+            [connections]
+            "Office dock" = "stationary"
             "#,
         )
         .unwrap();
 
         assert_eq!(config.default_profile, "high_capacity");
         assert_eq!(config.networks.len(), 2);
+        assert_eq!(config.connections.len(), 1);
         assert_eq!(config.networks["Office WiFi"], "balanced");
+        assert_eq!(config.connections["Office dock"], "stationary");
     }
 
     #[test]
@@ -411,6 +617,7 @@ mod tests {
         let config = Config::parse("").unwrap();
         assert_eq!(config.default_profile, DEFAULT_PROFILE);
         assert!(config.networks.is_empty());
+        assert!(config.connections.is_empty());
     }
 
     #[test]
@@ -424,10 +631,75 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(config.resolve(Some("Calypso-TIM")).profile, "stationary");
-        assert_eq!(config.resolve(Some("Other")).profile, "high_capacity");
-        assert_eq!(config.resolve(None).profile, "high_capacity");
-        assert!(config.resolve(Some("Other")).reason.contains("no rule"));
+        assert_eq!(config.resolve(&wifi("Calypso-TIM")).profile, "stationary");
+        assert_eq!(config.resolve(&wifi("Other")).profile, "high_capacity");
+        assert_eq!(
+            config.resolve(&ActiveNetwork::default()).profile,
+            "high_capacity"
+        );
+        assert!(config.resolve(&wifi("Other")).reason.contains("no rule"));
+    }
+
+    #[test]
+    fn resolves_connection_by_name_and_uuid() {
+        let config = Config::parse(
+            r#"
+            [connections]
+            "Office dock" = "stationary"
+            "55555555-5555-5555-5555-555555555555" = "balanced"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.resolve(&wired("Office dock", "uuid-a")).profile,
+            "stationary"
+        );
+        assert_eq!(
+            config
+                .resolve(&wired("Other", "55555555-5555-5555-5555-555555555555"))
+                .profile,
+            "balanced"
+        );
+        assert!(config
+            .resolve(&wired("Office dock", "uuid-a"))
+            .reason
+            .contains("Office dock"));
+    }
+
+    #[test]
+    fn ssid_rule_wins_over_connection_rule() {
+        let config = Config::parse(
+            r#"
+            [networks]
+            "HomeWiFi" = "stationary"
+            [connections]
+            "HomeWiFi" = "balanced"
+            "#,
+        )
+        .unwrap();
+
+        let active = ActiveNetwork {
+            ssid: Some("HomeWiFi".to_string()),
+            connection: Some(ActiveConnection {
+                name: "HomeWiFi".to_string(),
+                uuid: "uuid-a".to_string(),
+            }),
+        };
+
+        assert_eq!(config.resolve(&active).profile, "stationary");
+    }
+
+    #[test]
+    fn ethernet_without_a_rule_gets_the_default() {
+        let config = Config::parse("[networks]\n\"HomeWiFi\" = \"stationary\"\n").unwrap();
+
+        assert_eq!(
+            config
+                .resolve(&wired("Wired connection 1", "uuid-a"))
+                .profile,
+            "high_capacity"
+        );
     }
 
     #[test]
@@ -435,12 +707,12 @@ mod tests {
         let (dir, ec) = temp_ec("apply");
         let config = Config::parse("[networks]\n\"Calypso-TIM\" = \"stationary\"\n").unwrap();
 
-        let first = apply(&config, &ec, Some("Calypso-TIM".into()), false).unwrap();
+        let first = apply(&config, &ec, &wifi("Calypso-TIM"), false).unwrap();
         assert!(first.changed);
         assert_eq!(first.desired, "stationary");
         assert_eq!(ec.current().unwrap(), "stationary");
 
-        let second = apply(&config, &ec, Some("Calypso-TIM".into()), false).unwrap();
+        let second = apply(&config, &ec, &wifi("Calypso-TIM"), false).unwrap();
         assert!(!second.changed);
         assert_eq!(second.current, "stationary");
 
@@ -452,7 +724,7 @@ mod tests {
         let (dir, ec) = temp_ec("dry-run");
         let config = Config::parse("[networks]\n\"Calypso-TIM\" = \"stationary\"\n").unwrap();
 
-        let report = apply(&config, &ec, Some("Calypso-TIM".into()), true).unwrap();
+        let report = apply(&config, &ec, &wifi("Calypso-TIM"), true).unwrap();
         assert!(report.changed);
         assert!(report.dry_run);
         assert_eq!(ec.current().unwrap(), "high_capacity");
@@ -465,7 +737,7 @@ mod tests {
         let (dir, ec) = temp_ec("typo");
         let config = Config::parse("[networks]\n\"Calypso-TIM\" = \"stationarry\"\n").unwrap();
 
-        let err = apply(&config, &ec, Some("Calypso-TIM".into()), true).unwrap_err();
+        let err = apply(&config, &ec, &wifi("Calypso-TIM"), true).unwrap_err();
         assert!(err.contains("unknown profile"));
         assert_eq!(ec.current().unwrap(), "high_capacity");
 
@@ -513,8 +785,8 @@ mod tests {
         let (dir, ec) = temp_ec("revert");
         let config = Config::parse("[networks]\n\"Calypso-TIM\" = \"stationary\"\n").unwrap();
 
-        apply(&config, &ec, Some("Calypso-TIM".into()), false).unwrap();
-        apply(&config, &ec, None, false).unwrap();
+        apply(&config, &ec, &wifi("Calypso-TIM"), false).unwrap();
+        apply(&config, &ec, &ActiveNetwork::default(), false).unwrap();
         assert_eq!(ec.current().unwrap(), "high_capacity");
 
         let _ = fs::remove_dir_all(dir);
@@ -531,7 +803,7 @@ mod tests {
     #[test]
     fn reports_missing_ec_attribute() {
         let ec = Ec::new("/nonexistent/charging_profile/charging_profile");
-        let err = apply(&Config::default(), &ec, None, false).unwrap_err();
+        let err = apply(&Config::default(), &ec, &ActiveNetwork::default(), false).unwrap_err();
         assert!(err.contains("not found"));
     }
 }

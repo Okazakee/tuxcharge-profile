@@ -174,8 +174,8 @@ fn cmd_apply(opts: &Options) -> i32 {
         }
     };
 
-    let ssid = match lib::active_ssid() {
-        Ok(ssid) => ssid,
+    let active = match lib::active_network() {
+        Ok(active) => active,
         Err(err) => {
             eprintln!("{BIN}: {err}");
             return 1;
@@ -183,7 +183,7 @@ fn cmd_apply(opts: &Options) -> i32 {
     };
 
     let ec = lib::Ec::new(opts.ec.clone());
-    match lib::apply(&config, &ec, ssid, opts.dry_run) {
+    match lib::apply(&config, &ec, &active, opts.dry_run) {
         Ok(report) => {
             print_report(&report, opts.quiet);
             0
@@ -196,8 +196,8 @@ fn cmd_apply(opts: &Options) -> i32 {
 }
 
 fn print_report(report: &lib::Report, quiet: bool) {
-    let network = report.ssid.as_deref().unwrap_or("no Wi-Fi");
     let prefix = if report.dry_run { "[dry-run] " } else { "" };
+    let network = &report.network;
 
     if !report.changed {
         if !quiet {
@@ -235,24 +235,32 @@ fn cmd_status(opts: &Options) -> i32 {
     match &loaded {
         Ok((_, true)) => println!("             missing — using defaults"),
         Ok((config, false)) => println!(
-            "             default \"{}\", {} rule(s)",
+            "             default \"{}\", {} Wi-Fi rule(s), {} connection rule(s)",
             config.default_profile,
-            config.networks.len()
+            config.networks.len(),
+            config.connections.len()
         ),
         Err(err) => println!("             {err}"),
     }
 
-    let ssid = match lib::active_ssid() {
-        Ok(ssid) => ssid,
+    let active = match lib::active_network() {
+        Ok(active) => active,
         Err(err) => {
             eprintln!("{BIN}: {err}");
             return 1;
         }
     };
-    println!("network      {}", ssid.as_deref().unwrap_or("(none)"));
+    println!(
+        "network      {}",
+        active.ssid.as_deref().unwrap_or("(no Wi-Fi)")
+    );
+    match &active.connection {
+        Some(connection) => println!("connection   {} ({})", connection.name, connection.uuid),
+        None => println!("connection   (none)"),
+    }
 
     if let Ok((config, _)) = &loaded {
-        let resolution = config.resolve(ssid.as_deref());
+        let resolution = config.resolve(&active);
         println!(
             "wanted       {} ({})",
             resolution.profile, resolution.reason

@@ -4,7 +4,9 @@
 [![CI](https://github.com/Okazakee/tuxcharge-profile/actions/workflows/ci.yml/badge.svg)](https://github.com/Okazakee/tuxcharge-profile/actions/workflows/ci.yml)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-Set a TUXEDO laptop charging profile based on the connected Wi-Fi network.
+Set a TUXEDO laptop charging profile based on the connected network: the Wi-Fi
+SSID, or the NetworkManager connection name/UUID when that is all there is
+(Ethernet).
 
 TUXEDO Control Center can limit battery charging to ~90% or ~80%, but the setting
 lives in the embedded controller and goes with it. Uninstall TCC and the profile
@@ -66,11 +68,21 @@ default = "high_capacity"
 [networks]
 "HomeWiFi" = "stationary"
 "Office WiFi" = "balanced"
+
+[connections]
+"Office dock" = "balanced"
+"a1b2c3d4-0000-0000-0000-000000000000" = "stationary"
 ```
 
-- A network listed under `[networks]` gets its profile.
-- Everything else — another Wi-Fi, Wi-Fi off, plain Ethernet — gets `default`.
-- Quote SSIDs containing spaces or special characters.
+- `[networks]` matches the SSID of the connected Wi-Fi.
+- `[connections]` matches the NetworkManager connection name or UUID. That is
+  how Ethernet is covered: it has no SSID.
+- An SSID rule wins when both would match, so existing `[networks]` configs keep
+  working unchanged.
+- Everything else — another Wi-Fi, another cable, Wi-Fi off — gets `default`.
+- Quote SSIDs and connection names containing spaces or special characters.
+
+`nmcli -t -f NAME,UUID connection show` lists the names and UUIDs to use.
 
 Then apply immediately:
 
@@ -96,7 +108,8 @@ change), `--config <path>`, `--ec <path>`.
    `/etc/NetworkManager/dispatcher.d/` for a source install,
    `/usr/lib/NetworkManager/dispatcher.d/` when installed from the package. The
    boot unit covers the case where it is already connected to something.
-2. The tool reads the active SSID from `nmcli`, resolves it against the config,
+2. The tool reads the active Wi-Fi SSID and the active NetworkManager
+   connection (name and UUID) from `nmcli`, resolves them against the config,
    reads the current EC profile, and writes the new one only if it differs.
 3. Writes go to the same driver attribute TCC used:
    `/sys/devices/platform/tuxedo_keyboard/charging_profile/charging_profile`.
@@ -121,8 +134,8 @@ so a resume from suspend does not undo the change.
 - A missing config file means `default` is applied, with a warning in the
   journal. A config that exists but does not parse is an error, and nothing is
   written to the EC.
-- Matching is exact per SSID. There are deliberately no wildcards or
-  AC/battery rules.
+- Matching is exact per SSID, or per NetworkManager connection name/UUID. There
+  are deliberately no wildcards or AC/battery rules.
 - NetworkManager only. Users on `iwd`/`systemd-networkd` would need a different
   trigger.
 
