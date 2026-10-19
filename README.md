@@ -1,5 +1,7 @@
 # tuxcharge-profile
 
+[![AUR version](https://img.shields.io/aur/version/tuxcharge-profile)](https://aur.archlinux.org/packages/tuxcharge-profile)
+[![CI](https://github.com/Okazakee/tuxcharge-profile/actions/workflows/ci.yml/badge.svg)](https://github.com/Okazakee/tuxcharge-profile/actions/workflows/ci.yml)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 Set a TUXEDO laptop charging profile based on the connected Wi-Fi network.
@@ -28,6 +30,19 @@ in firmware and is not visible to the kernel.
 
 ## Install
 
+### Arch Linux
+
+```bash
+yay -S tuxcharge-profile
+sudo systemctl enable --now tuxcharge-profile.service
+```
+
+The package installs the binary plus the hook and unit under `/usr/lib`, and
+leaves `/etc` alone. It ships no config: until you create one, the tool applies
+full capacity (the stock behaviour) and says so in the journal.
+
+### From source
+
 ```bash
 git clone https://github.com/Okazakee/tuxcharge-profile
 cd tuxcharge-profile
@@ -41,13 +56,15 @@ unit, then enables the unit.
 
 ## Configure
 
-`/etc/tuxcharge-profile/config.toml`:
+`/etc/tuxcharge-profile/config.toml` — start from `config/config.toml.example`
+in the repo, or `/usr/share/tuxcharge-profile/config.toml.example` when
+installed from a package:
 
 ```toml
 default = "high_capacity"
 
 [networks]
-"Calypso-TIM" = "stationary"
+"HomeWiFi" = "stationary"
 "Office WiFi" = "balanced"
 ```
 
@@ -75,9 +92,10 @@ change), `--config <path>`, `--ec <path>`.
 
 ## How it works
 
-1. NetworkManager runs `/etc/NetworkManager/dispatcher.d/90-tuxcharge-profile` on
-   every network change; the boot unit covers the case where it is already
-   connected to something.
+1. NetworkManager runs `90-tuxcharge-profile` on every network change — from
+   `/etc/NetworkManager/dispatcher.d/` for a source install,
+   `/usr/lib/NetworkManager/dispatcher.d/` when installed from the package. The
+   boot unit covers the case where it is already connected to something.
 2. The tool reads the active SSID from `nmcli`, resolves it against the config,
    reads the current EC profile, and writes the new one only if it differs.
 3. Writes go to the same driver attribute TCC used:
@@ -93,12 +111,16 @@ so a resume from suspend does not undo the change.
 - `tuxedo-drivers-dkms`
 - NetworkManager (`nmcli`)
 - Root for `apply`/`set`/`install`; `status` works as a normal user
+- Rust toolchain, source builds only
 
 ## Notes and limitations
 
 - If `tccd` (TUXEDO Control Center) is running, the tool refuses to write: TCC owns
   the same setting, and both writing it would cause flip-flopping. Uninstall TCC
   or stop `tccd` to use this.
+- A missing config file means `default` is applied, with a warning in the
+  journal. A config that exists but does not parse is an error, and nothing is
+  written to the EC.
 - Matching is exact per SSID. There are deliberately no wildcards or
   AC/battery rules.
 - NetworkManager only. Users on `iwd`/`systemd-networkd` would need a different
@@ -107,6 +129,11 @@ so a resume from suspend does not undo the change.
 ## Uninstall
 
 ```bash
+# package install
+sudo systemctl disable --now tuxcharge-profile.service
+sudo pacman -Rns tuxcharge-profile
+
+# source install
 sudo systemctl disable --now tuxcharge-profile.service
 sudo rm /etc/NetworkManager/dispatcher.d/90-tuxcharge-profile \
         /etc/systemd/system/tuxcharge-profile.service \
