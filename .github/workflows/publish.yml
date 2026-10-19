@@ -56,10 +56,12 @@ jobs:
         env:
           GIT_SSH_COMMAND: ssh -i ~/.ssh/aur -o StrictHostKeyChecking=accept-new
         run: |
-          if git clone ssh://aur@aur.archlinux.org/tuxcharge-profile.git aur-pkg 2>/dev/null; then
-            echo "cloned existing AUR package"
+          # The AUR hands out an empty repository for a package that is not
+          # registered yet, so a successful clone does not mean it exists.
+          if git clone ssh://aur@aur.archlinux.org/tuxcharge-profile.git aur-pkg; then
+            echo "AUR repository present"
           else
-            echo "no AUR package yet — creating it with the first push"
+            echo "no AUR repository — creating it with the first push"
             rm -rf aur-pkg
             mkdir -p aur-pkg && cd aur-pkg
             git init -q -b master
@@ -69,15 +71,19 @@ jobs:
         shell: bash
         run: |
           cp packaging/aur/PKGBUILD aur-pkg/PKGBUILD
-          cd aur-pkg
           VERSION="${GITHUB_REF_NAME#v}"
-          sed -i "s/^pkgver=.*/pkgver=$VERSION/" PKGBUILD
-          sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
-          sed -i "s/^sha256sums=.*/sha256sums=('${{ steps.hash.outputs.sha256 }}')/" PKGBUILD
-          # makepkg refuses to run as root, so generate .SRCINFO as a normal user
+          sed -i "s/^pkgver=.*/pkgver=$VERSION/" aur-pkg/PKGBUILD
+          sed -i "s/^pkgrel=.*/pkgrel=1/" aur-pkg/PKGBUILD
+          sed -i "s/^sha256sums=.*/sha256sums=('${{ steps.hash.outputs.sha256 }}')/" aur-pkg/PKGBUILD
+          # makepkg refuses to run as root, so generate .SRCINFO in a scratch
+          # directory: the clone itself stays root-owned, which is what git
+          # needs later.
           useradd -m builder
-          chown -R builder .
-          su builder -c 'makepkg --printsrcinfo' > .SRCINFO
+          mkdir -p /tmp/srcinfo
+          cp aur-pkg/PKGBUILD /tmp/srcinfo/PKGBUILD
+          chown -R builder /tmp/srcinfo
+          su builder -c 'cd /tmp/srcinfo && makepkg --printsrcinfo' > aur-pkg/.SRCINFO
+          cat aur-pkg/.SRCINFO
       - name: Commit and push
         shell: bash
         env:
@@ -87,5 +93,5 @@ jobs:
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add .
-          git commit -m "tuxcharge-profile ${{ github.ref_name }}"
+          git diff --staged --quiet || git commit -m "tuxcharge-profile ${{ github.ref_name }}"
           git push
