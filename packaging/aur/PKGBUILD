@@ -1,6 +1,6 @@
 # Maintainer: Okazakee <okazakee@proton.me>
 pkgname=tuxcharge-profile
-pkgver=0.2.0
+pkgver=0.2.1
 pkgrel=1
 pkgdesc="Set a TUXEDO laptop charging profile based on the connected Wi-Fi network"
 arch=('x86_64')

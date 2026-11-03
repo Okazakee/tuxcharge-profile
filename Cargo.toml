@@ -1,6 +1,6 @@
 [package]
 name = "tuxcharge-profile"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Set a TUXEDO laptop charging profile based on the connected Wi-Fi network"
 license = "MIT"
