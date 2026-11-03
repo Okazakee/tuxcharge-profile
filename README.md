@@ -100,7 +100,12 @@ sudo tuxcharge-profile apply
 | `tuxcharge-profile install` | Install config, NetworkManager hook and boot unit (root) |
 
 Useful flags: `--dry-run` (report without writing), `--quiet` (only print on
-change), `--config <path>`, `--ec <path>`.
+change), `--wait <secs>` (wait for the EC attribute to appear), `--config
+<path>`, `--ec <path>`.
+
+`--ignore-missing` turns a missing EC attribute into a clean exit, which is what
+the NetworkManager hook uses: at boot the link is reported before the driver has
+published the attribute, and the boot unit is the one that waits for it.
 
 ## How it works
 
@@ -136,6 +141,10 @@ so a resume from suspend does not undo the change.
   written to the EC.
 - Matching is exact per SSID, or per NetworkManager connection name/UUID. There
   are deliberately no wildcards or AC/battery rules.
+- At boot the `tuxedo_keyboard` probe can finish after NetworkManager reports the
+  first link. The boot unit waits up to 5 s for the attribute
+  (`apply --wait 5`); the hook exits quietly instead of failing when the
+  attribute is not there yet.
 - NetworkManager only. Users on `iwd`/`systemd-networkd` would need a different
   trigger.
 

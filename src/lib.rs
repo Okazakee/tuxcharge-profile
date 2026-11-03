@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 /// Charging profile attribute exposed by the `tuxedo_keyboard` driver.
 pub const EC_PROFILE_PATH: &str =
@@ -155,18 +156,26 @@ pub fn load_config(path: &Path) -> Result<(Config, bool), String> {
 }
 
 /// NetworkManager dispatcher script, run as root on network changes.
+///
+/// `--ignore-missing` matters at boot: NetworkManager reports the first link
+/// before `tuxedo_keyboard` has finished probing and published the EC
+/// attributes, and a non-zero exit there is logged as a failed hook. The boot
+/// unit waits for the attribute, so this one can stay a no-op.
 pub fn dispatcher_script(bin: &str) -> String {
     format!(
         r#"#!/bin/sh
 # Installed by tuxcharge-profile — apply the charging profile for the new network.
 # NetworkManager runs this as root on every network change.
 [ -x {bin} ] || exit 0
-exec {bin} apply --quiet
+exec {bin} apply --quiet --ignore-missing
 "#
     )
 }
 
 /// systemd unit re-asserting the profile at boot.
+///
+/// The wait covers the window between `NetworkManager.service` and the
+/// `tuxedo_keyboard` platform-probe that creates the sysfs attributes.
 pub fn service_unit(bin: &str) -> String {
     format!(
         r#"[Unit]
@@ -178,7 +187,7 @@ Wants=NetworkManager.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart={bin} apply
+ExecStart={bin} apply --wait 5
 
 [Install]
 WantedBy=multi-user.target
@@ -195,6 +204,30 @@ pub struct Resolution {
 // =====================================================================
 // embedded controller
 // =====================================================================
+
+/// Poll `path` until it exists or `timeout` elapses.
+///
+/// Kernel drivers publish sysfs attributes when their probe completes, which
+/// can be later than the unit or hook that wants to write them. Callers that
+/// run at boot use this instead of failing on the first look.
+pub fn wait_for(path: &Path, timeout: Duration, interval: Duration) -> bool {
+    if path.exists() {
+        return true;
+    }
+
+    let interval = interval.max(Duration::from_millis(1));
+    let deadline = Instant::now() + timeout;
+
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        std::thread::sleep(interval.min(remaining));
+        if path.exists() {
+            return true;
+        }
+    }
+
+    false
+}
 
 /// The EC charging profile attribute and its siblings.
 #[derive(Debug, Clone)]
@@ -215,6 +248,11 @@ impl Ec {
 
     pub fn present(&self) -> bool {
         self.profile_path.exists()
+    }
+
+    /// Wait up to `timeout` for the driver to publish the attribute.
+    pub fn wait_until_present(&self, timeout: Duration) -> bool {
+        wait_for(&self.profile_path, timeout, Duration::from_millis(100))
     }
 
     /// Profiles the running driver advertises, falling back to the known set.
@@ -776,8 +814,70 @@ HomeWiFi:33333333-3333-3333-3333-333333333333:802-11-wireless\n";
     #[test]
     fn templates_embed_the_binary_path() {
         let bin = "/usr/bin/tuxcharge-profile";
-        assert!(dispatcher_script(bin).contains("/usr/bin/tuxcharge-profile apply --quiet"));
-        assert!(service_unit(bin).contains("ExecStart=/usr/bin/tuxcharge-profile apply"));
+        assert!(dispatcher_script(bin)
+            .contains("/usr/bin/tuxcharge-profile apply --quiet --ignore-missing"));
+        assert!(service_unit(bin).contains("ExecStart=/usr/bin/tuxcharge-profile apply --wait 5"));
+    }
+
+    #[test]
+    fn wait_for_returns_immediately_when_the_path_exists() {
+        let (dir, ec) = temp_ec("wait-present");
+
+        let started = Instant::now();
+        assert!(ec.wait_until_present(Duration::from_secs(2)));
+        assert!(started.elapsed() < Duration::from_millis(500));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn wait_for_ignores_a_zero_timeout_when_present() {
+        let (dir, ec) = temp_ec("wait-zero");
+        assert!(ec.wait_until_present(Duration::ZERO));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn wait_for_gives_up_after_the_timeout() {
+        let path = std::env::temp_dir().join(format!(
+            "tuxcharge-profile-test-wait-absent-{}/charging_profile",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+
+        let started = Instant::now();
+        assert!(!wait_for(
+            &path,
+            Duration::from_millis(120),
+            Duration::from_millis(10)
+        ));
+        assert!(started.elapsed() >= Duration::from_millis(100));
+    }
+
+    #[test]
+    fn wait_for_returns_once_the_attribute_appears() {
+        let dir = std::env::temp_dir().join(format!(
+            "tuxcharge-profile-test-wait-late-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("charging_profile");
+
+        let created = path.clone();
+        let creator = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            fs::write(&created, "balanced\n").unwrap();
+        });
+
+        assert!(wait_for(
+            &path,
+            Duration::from_secs(2),
+            Duration::from_millis(10)
+        ));
+        creator.join().unwrap();
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

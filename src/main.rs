@@ -7,6 +7,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
+use std::time::Duration;
 
 use tuxcharge_profile_lib as lib;
 
@@ -22,6 +23,8 @@ struct Options {
     ec: PathBuf,
     quiet: bool,
     dry_run: bool,
+    wait: Duration,
+    ignore_missing: bool,
 }
 
 fn main() {
@@ -51,15 +54,24 @@ fn main() {
 // =====================================================================
 
 fn parse_args() -> (Options, String, Vec<String>) {
+    parse_args_from(std::env::args().skip(1))
+}
+
+fn parse_args_from<I>(argv: I) -> (Options, String, Vec<String>)
+where
+    I: IntoIterator<Item = String>,
+{
     let mut opts = Options {
         config: env_path("TUXCHARGE_PROFILE_CONFIG").unwrap_or_else(|| PathBuf::from(CONFIG_PATH)),
         ec: env_path("TUXCHARGE_PROFILE_EC").unwrap_or_else(|| PathBuf::from(lib::EC_PROFILE_PATH)),
         quiet: false,
         dry_run: false,
+        wait: Duration::ZERO,
+        ignore_missing: false,
     };
 
     let mut positional: Vec<String> = Vec::new();
-    let mut args = std::env::args().skip(1);
+    let mut args = argv.into_iter();
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -71,6 +83,14 @@ fn parse_args() -> (Options, String, Vec<String>) {
                 Some(value) => opts.ec = PathBuf::from(value),
                 None => die("--ec requires a path"),
             },
+            "--wait" | "-w" => match args.next() {
+                Some(value) => match value.parse::<u64>() {
+                    Ok(seconds) => opts.wait = Duration::from_secs(seconds),
+                    Err(_) => die("--wait expects a number of seconds"),
+                },
+                None => die("--wait requires a number of seconds"),
+            },
+            "--ignore-missing" => opts.ignore_missing = true,
             "--quiet" | "-q" => opts.quiet = true,
             "--dry-run" | "-n" => opts.dry_run = true,
             "--help" | "-h" => {
@@ -120,6 +140,8 @@ COMMANDS:
 OPTIONS:
     -c, --config <PATH>   Config file (default: {CONFIG_PATH})
         --ec <PATH>       EC charging profile attribute (default: driver default)
+        --wait <SECS>     Wait up to SECS for the EC attribute to appear
+        --ignore-missing  Exit 0 when the EC attribute is absent (network hook)
     -n, --dry-run         Report what would change without writing to the EC
     -q, --quiet           Only print when something changes
     -h, --help            Show this help
@@ -147,9 +169,9 @@ Config, when no file is present, defaults to full capacity:
 // =====================================================================
 
 /// Load the config, warning when the built-in defaults are in use.
-fn configured(path: &Path) -> Result<lib::Config, String> {
+fn configured(path: &Path, quiet: bool) -> Result<lib::Config, String> {
     let (config, fallback) = lib::load_config(path)?;
-    if fallback {
+    if fallback && !quiet {
         eprintln!(
             "{BIN}: no config at {} — using defaults ({}); example: {}",
             path.display(),
@@ -166,7 +188,18 @@ fn cmd_apply(opts: &Options) -> i32 {
         return 0;
     }
 
-    let config = match configured(&opts.config) {
+    let ec = lib::Ec::new(opts.ec.clone());
+
+    // The driver publishes the EC attribute when its probe finishes, which at
+    // boot can be later than NetworkManager's first link event.
+    if !ec.present() && !opts.wait.is_zero() {
+        ec.wait_until_present(opts.wait);
+    }
+    if !ec.present() && opts.ignore_missing {
+        return 0;
+    }
+
+    let config = match configured(&opts.config, opts.quiet) {
         Ok(config) => config,
         Err(err) => {
             eprintln!("{BIN}: {err}");
@@ -182,7 +215,6 @@ fn cmd_apply(opts: &Options) -> i32 {
         }
     };
 
-    let ec = lib::Ec::new(opts.ec.clone());
     match lib::apply(&config, &ec, &active, opts.dry_run) {
         Ok(report) => {
             print_report(&report, opts.quiet);
@@ -423,4 +455,48 @@ fn install_binary() -> Result<PathBuf, String> {
     println!("installed {INSTALL_BIN}");
 
     Ok(PathBuf::from(INSTALL_BIN))
+}
+
+// =====================================================================
+// tests
+// =====================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(argv: &[&str]) -> (Options, String, Vec<String>) {
+        parse_args_from(argv.iter().map(|arg| arg.to_string()))
+    }
+
+    #[test]
+    fn wait_defaults_to_zero_and_missing_is_an_error() {
+        let (opts, command, rest) = parse(&["apply"]);
+        assert_eq!(command, "apply");
+        assert!(rest.is_empty());
+        assert!(opts.wait.is_zero());
+        assert!(!opts.ignore_missing);
+    }
+
+    #[test]
+    fn parses_wait_and_ignore_missing() {
+        let (opts, command, _) = parse(&["apply", "--wait", "5", "--ignore-missing", "--quiet"]);
+        assert_eq!(command, "apply");
+        assert_eq!(opts.wait, Duration::from_secs(5));
+        assert!(opts.ignore_missing);
+        assert!(opts.quiet);
+    }
+
+    #[test]
+    fn accepts_the_short_wait_flag() {
+        let (opts, _, _) = parse(&["apply", "-w", "2"]);
+        assert_eq!(opts.wait, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn keeps_positional_arguments_after_flags() {
+        let (_, command, rest) = parse(&["set", "balanced", "--dry-run"]);
+        assert_eq!(command, "set");
+        assert_eq!(rest, vec!["balanced".to_string()]);
+    }
 }
