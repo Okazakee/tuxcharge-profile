@@ -2,4 +2,4 @@
 # Installed by tuxcharge-profile — apply the charging profile for the new network.
 # NetworkManager runs this as root on every network change.
 [ -x /usr/bin/tuxcharge-profile ] || exit 0
-exec /usr/bin/tuxcharge-profile apply --quiet
+exec /usr/bin/tuxcharge-profile apply --quiet --ignore-missing

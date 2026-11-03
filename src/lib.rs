@@ -819,6 +819,21 @@ HomeWiFi:33333333-3333-3333-3333-333333333333:802-11-wireless\n";
         assert!(service_unit(bin).contains("ExecStart=/usr/bin/tuxcharge-profile apply --wait 5"));
     }
 
+    /// The package ships `systemd/`, not the generated templates, so the two
+    /// copies must stay byte-identical or the packaged unit drifts behind.
+    #[test]
+    fn packaged_hook_and_unit_match_the_generated_templates() {
+        let bin = "/usr/bin/tuxcharge-profile";
+        assert_eq!(
+            include_str!("../systemd/90-tuxcharge-profile"),
+            dispatcher_script(bin)
+        );
+        assert_eq!(
+            include_str!("../systemd/tuxcharge-profile.service"),
+            service_unit(bin)
+        );
+    }
+
     #[test]
     fn wait_for_returns_immediately_when_the_path_exists() {
         let (dir, ec) = temp_ec("wait-present");
